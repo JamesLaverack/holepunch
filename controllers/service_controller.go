@@ -26,6 +26,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+const (
+	holepunchAnnotationName = "holepunch/punch-external"
+)
+
 // ServiceReconciler reconciles a Service object
 type ServiceReconciler struct {
 	client.Client
@@ -37,12 +41,42 @@ type ServiceReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=services/status,verbs=get;update;patch
 
 func (r *ServiceReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
-	_ = context.Background()
-	_ = r.Log.WithValues("service", req.NamespacedName)
+	ctx := context.Background()
+	log := r.Log.WithValues("service", req.NamespacedName)
 
-	// your logic here
+	// Get the service
+	var service corev1.Service
+	if err := r.Get(ctx, req.NamespacedName, &service); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// We only care about services that have our annotation on them
+	if !hasHolepunchAnnotation(service) {
+		// Nothing to be done
+		return ctrl.Result{}, nil
+	}
+
+	// We only care about LoadBalancer services. We need a real internal IP to map to!
+	if service.Spec.Type != corev1.ServiceTypeLoadBalancer {
+		// This means we've put the annotation on a service that isn't a loadbalancer.
+		log.Error(nil, "Holepunch enabled on non-LoadBalancer service")
+		// TODO emit event onto the service
+		return ctrl.Result{}, nil
+	}
+
+	log.Info("Identified service of interest")
+	// TODO everything
 
 	return ctrl.Result{}, nil
+}
+
+func hasHolepunchAnnotation(service corev1.Service) bool {
+	for name, value := range service.Annotations {
+		if name == holepunchAnnotationName {
+			return value == "true"
+		}
+	}
+	return false
 }
 
 func (r *ServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
