@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"golang.org/x/sync/errgroup"
-	"github.com/huin/goupnp/dcps/internetgateway2"
+	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/huin/goupnp/dcps/internetgateway2"
+	"golang.org/x/sync/errgroup"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -16,7 +17,7 @@ import (
 
 const (
 	holepunchAnnotationName = "holepunch/punch-external"
-	leaseDurationSeconds    = 3600
+	leaseDurationSeconds    = 500
 )
 
 // ServiceReconciler reconciles a Service object
@@ -26,8 +27,8 @@ type ServiceReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=services/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=services/status,verbs=get
 
 func (r *ServiceReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	ctx := context.Background()
@@ -53,28 +54,31 @@ func (r *ServiceReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		return ctrl.Result{}, nil
 	}
 
-	// We need to verify that we've got an IP to map onto
-	serviceIP, err := getServiceIP(service)
-	if err != nil {
-		log.Error(err, "Failed to get IP for service")
-		return ctrl.Result{}, err
-	}
-	log = log.WithValues("service-ip", serviceIP)
-	log.Info("Discovered Service IP")
-
+	// Find a router to configure
 	router, err := PickRouterClient(ctx)
 	if err != nil {
 		log.Error(err, "Failed to find router to configure")
 		return ctrl.Result{}, err
 	}
 
+	// Ask that router for *it's* external IP.
+	// This is where the term "external" gets weird. There's the underlying pods in the K8s cluster which have IPs, then
+	// the service has an IP inside the cluster, but it also has an "external" IP which is really an IP on the user's
+	// home network (usually), and when we ask the *router* for "external" we really do mean public internet IP.
 	externalIP, err := router.GetExternalIPAddress()
 	if err != nil {
 		log.Error(err, "Failed to resolve external IP address")
 		return ctrl.Result{}, err
 	}
 	log = log.WithValues("external-ip", externalIP)
-	log.Info("Discovered External IP")
+
+	// Find the service's IP, that we're hoping is a local network IP from the perspective of the router.
+	serviceIP, err := getServiceIP(service)
+	if err != nil {
+		log.Error(err, "Failed to get IP for service (has it not been allocated yet?)")
+		return ctrl.Result{}, err
+	}
+	log = log.WithValues("service-ip", serviceIP)
 
 	// Try to forward every port
 	for _, servicePort := range service.Spec.Ports {
@@ -117,7 +121,9 @@ func (r *ServiceReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		}
 	}
 
-	return ctrl.Result{}, nil
+	// Even on a "success" we need to come back before our lease is up to redo it.
+	log.Info("Success, ports forwarded.", "reschedule-seconds", leaseDurationSeconds - 30)
+	return ctrl.Result{RequeueAfter: (leaseDurationSeconds - 30) * time.Second}, nil
 }
 
 func hasHolepunchAnnotation(service corev1.Service) bool {
