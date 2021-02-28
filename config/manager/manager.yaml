@@ -17,11 +17,14 @@ spec:
     matchLabels:
       control-plane: controller-manager
   replicas: 1
+  strategy:
+    type: Recreate
   template:
     metadata:
       labels:
         control-plane: controller-manager
     spec:
+      hostNetwork: true
       containers:
       - command:
         - /manager
@@ -37,3 +40,29 @@ spec:
             cpu: 100m
             memory: 20Mi
       terminationGracePeriodSeconds: 10
+---
+# This service is some Kubernetes networking magic shamelessly stolen from https://serverfault.com/a/948778. In short,
+# when combined with the `spec.template.spec.hostNetwork: true` flag on the Deployment, it allows this Pod to work with
+# UPnP.
+# However. There can only be one at any one time. So no other UPnP services on the same node, no multiple pods for
+# holepunch, and no RollingUpdate deployment strategy.
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    control-plane: controller-manager
+  name: upnp
+  namespace: system
+spec:
+  type: NodePort
+  ports:
+    - name: '32767'
+      port: 32767
+      protocol: UDP
+      targetPort: 54321
+    - name: '31900'
+      port: 31900
+      protocol: UDP
+      targetPort: 1900
+  selector:
+    control-plane: controller-manager
