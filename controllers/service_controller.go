@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"golang.org/x/sync/errgroup"
 	"github.com/huin/goupnp/dcps/internetgateway2"
 
@@ -15,6 +16,7 @@ import (
 
 const (
 	holepunchAnnotationName = "holepunch/punch-external"
+	leaseDurationSeconds    = 3600
 )
 
 // ServiceReconciler reconciles a Service object
@@ -57,9 +59,9 @@ func (r *ServiceReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		log.Error(err, "Failed to get IP for service")
 		return ctrl.Result{}, err
 	}
-	log.Info("Discovered Service IP", "service-ip", serviceIP)
+	log = log.WithValues("service-ip", serviceIP)
+	log.Info("Discovered Service IP")
 
-	log.Info("Identified service of interest")
 	router, err := PickRouterClient(ctx)
 	if err != nil {
 		log.Error(err, "Failed to find router to configure")
@@ -71,12 +73,48 @@ func (r *ServiceReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		log.Error(err, "Failed to resolve external IP address")
 		return ctrl.Result{}, err
 	}
-	log.Info("Discovered External IP", "external-ip", externalIP)
+	log = log.WithValues("external-ip", externalIP)
+	log.Info("Discovered External IP")
 
 	// Try to forward every port
 	for _, servicePort := range service.Spec.Ports {
-		portNumber := servicePort.Port
-		log.Info("Attempting to forward port from router with UPnP", "forwarding-port", portNumber)
+		// For some reason the Kubernetes Service API thinks a port can be an int32. On Linux at least it'll *always*
+		// be a uint16 so this is a safe cast.
+		portNumber := uint16(servicePort.Port)
+		protocol, err := toUPnPProtocol(servicePort.Protocol)
+		if err != nil {
+			log.Error(err, "Unable to resolve protocol to use")
+			return ctrl.Result{}, err
+		}
+		description := "foo" //fmt.Sprintf("%s-%s-%d-%s", service.Name, service.Namespace, portNumber, protocol)
+		portLogger := log.WithValues("forwarding-port", portNumber,
+			"upnp-description", description,
+			"lease-duration", leaseDurationSeconds)
+		portLogger.Info("Attempting to forward port from router with UPnP")
+		if err = router.AddPortMapping(
+			"",
+			// External port number to expose to Internet:
+			portNumber,
+			// Forward TCP (this could be "UDP" if we wanted that instead).
+			protocol,
+			// Internal port number on the LAN to forward to.
+			// Some routers might not support this being different to the external
+			// port number.
+			portNumber,
+			// Internal address on the LAN we want to forward to.
+			serviceIP,
+			// Enabled:
+			true,
+			// Informational description for the client requesting the port forwarding.
+			description,
+			// How long should the port forward last for in seconds.
+			// If you want to keep it open for longer and potentially across router
+			// resets, you might want to periodically request before this elapses.
+			leaseDurationSeconds,
+		); err != nil {
+			portLogger.Error(err, "Failed to configure UPnP port-forwarding")
+			return ctrl.Result{}, err
+		}
 	}
 
 	return ctrl.Result{}, nil
@@ -89,6 +127,17 @@ func hasHolepunchAnnotation(service corev1.Service) bool {
 		}
 	}
 	return false
+}
+
+func toUPnPProtocol(serviceProtocol corev1.Protocol) (string, error) {
+	if serviceProtocol == corev1.ProtocolTCP {
+		return "TCP", nil
+	} else if serviceProtocol == corev1.ProtocolUDP {
+		return "UDP", nil
+	} else {
+		// This could happen, for example with corev1.ProtocolSTCP
+		return "", errors.New(fmt.Sprintf("protocol type %s not supported", serviceProtocol))
+	}
 }
 
 func getServiceIP(service corev1.Service) (string, error) {
