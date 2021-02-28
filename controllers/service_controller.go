@@ -1,23 +1,10 @@
-/*
-
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package controllers
 
 import (
 	"context"
+	"errors"
+	"golang.org/x/sync/errgroup"
+	"github.com/huin/goupnp/dcps/internetgateway2"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
@@ -64,8 +51,33 @@ func (r *ServiceReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		return ctrl.Result{}, nil
 	}
 
+	// We need to verify that we've got an IP to map onto
+	serviceIP, err := getServiceIP(service)
+	if err != nil {
+		log.Error(err, "Failed to get IP for service")
+		return ctrl.Result{}, err
+	}
+	log.Info("Discovered Service IP", "service-ip", serviceIP)
+
 	log.Info("Identified service of interest")
-	// TODO everything
+	router, err := PickRouterClient(ctx)
+	if err != nil {
+		log.Error(err, "Failed to find router to configure")
+		return ctrl.Result{}, err
+	}
+
+	externalIP, err := router.GetExternalIPAddress()
+	if err != nil {
+		log.Error(err, "Failed to resolve external IP address")
+		return ctrl.Result{}, err
+	}
+	log.Info("Discovered External IP", "external-ip", externalIP)
+
+	// Try to forward every port
+	for _, servicePort := range service.Spec.Ports {
+		portNumber := servicePort.Port
+		log.Info("Attempting to forward port from router with UPnP", "forwarding-port", portNumber)
+	}
 
 	return ctrl.Result{}, nil
 }
@@ -77,6 +89,75 @@ func hasHolepunchAnnotation(service corev1.Service) bool {
 		}
 	}
 	return false
+}
+
+func getServiceIP(service corev1.Service) (string, error) {
+	for _, ingress := range service.Status.LoadBalancer.Ingress {
+		if ingress.IP != "" {
+			// TODO don't just take the first
+			return ingress.IP, nil
+		}
+	}
+	return "", errors.New("no IP available for LoadBalancer (not yet allocated?)")
+}
+
+type RouterClient interface {
+	AddPortMapping(
+		NewRemoteHost string,
+		NewExternalPort uint16,
+		NewProtocol string,
+		NewInternalPort uint16,
+		NewInternalClient string,
+		NewEnabled bool,
+		NewPortMappingDescription string,
+		NewLeaseDuration uint32,
+	) (err error)
+
+	GetExternalIPAddress() (
+		NewExternalIPAddress string,
+		err error,
+	)
+}
+
+func PickRouterClient(ctx context.Context) (RouterClient, error) {
+	tasks, _ := errgroup.WithContext(ctx)
+	// Request each type of client in parallel, and return what is found.
+	var ip1Clients []*internetgateway2.WANIPConnection1
+	tasks.Go(func() error {
+		var err error
+		ip1Clients, _, err = internetgateway2.NewWANIPConnection1Clients()
+		return err
+	})
+	var ip2Clients []*internetgateway2.WANIPConnection2
+	tasks.Go(func() error {
+		var err error
+		ip2Clients, _, err = internetgateway2.NewWANIPConnection2Clients()
+		return err
+	})
+	var ppp1Clients []*internetgateway2.WANPPPConnection1
+	tasks.Go(func() error {
+		var err error
+		ppp1Clients, _, err = internetgateway2.NewWANPPPConnection1Clients()
+		return err
+	})
+
+	if err := tasks.Wait(); err != nil {
+		return nil, err
+	}
+
+	// Trivial handling for where we find exactly one device to talk to, you
+	// might want to provide more flexible handling than this if multiple
+	// devices are found.
+	switch {
+	case len(ip2Clients) > 0:
+		return ip2Clients[0], nil
+	case len(ip1Clients) > 0:
+		return ip1Clients[0], nil
+	case len(ppp1Clients) > 0:
+		return ppp1Clients[0], nil
+	default:
+		return nil, errors.New("No services found")
+	}
 }
 
 func (r *ServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
