@@ -13,9 +13,10 @@ Holepunch automates this process, and configures your router using UPnP to whate
 ## Usage
 
 Deploy Holepunch into your cluster.
-A container image is available at `ghcr.io/jameslaverack/holepunch:v0.1.0`.
-You can use the provided Makefile to produce the YAML and deploy to your current kube config using:
+A container image is available at `ghcr.io/jameslaverack/holepunch`.
+You can use the provided Makefile to produce the YAML and deploy to your current kube config.
 
+For example, to deploy version `v0.1.0`:
 ```bash
 export IMG='ghcr.io/jameslaverack/holepunch:v0.1.0'
 make deploy
