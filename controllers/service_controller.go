@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -16,8 +18,9 @@ import (
 )
 
 const (
-	holepunchAnnotationName = "holepunch/punch-external"
-	leaseDurationSeconds    = 500
+	holepunchAnnotationName          = "holepunch/punch-external"
+	holepunchPortMapAnnotationPrefix = "holepunch.port/"
+	leaseDurationSeconds             = 500
 )
 
 // ServiceReconciler reconciles a Service object
@@ -52,6 +55,13 @@ func (r *ServiceReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		log.Error(nil, "Holepunch enabled on non-LoadBalancer service")
 		// TODO emit event onto the service
 		return ctrl.Result{}, nil
+	}
+
+	// Get the port mapping, if one exists. This instructs us to setup the UPnP mappings to use a *different* external
+	// and internal port. Some routers may not support this feature.
+	portMapping, err := getHolepunchPortMapping(service)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Find a router to configure
@@ -91,14 +101,25 @@ func (r *ServiceReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 			return ctrl.Result{}, err
 		}
 		description := "foo" //fmt.Sprintf("%s-%s-%d-%s", service.Name, service.Namespace, portNumber, protocol)
+
+		// Figure out if we want to map the port
+		externalPort, ok := portMapping[portNumber]
+		if !ok {
+			// We didn't have a mapping for this port.
+			externalPort = portNumber
+		}
+
+		// Log out
 		portLogger := log.WithValues("forwarding-port", portNumber,
+			"external-port", externalPort,
 			"upnp-description", description,
 			"lease-duration", leaseDurationSeconds)
 		portLogger.Info("Attempting to forward port from router with UPnP")
+
 		if err = router.AddPortMapping(
 			"",
 			// External port number to expose to Internet:
-			portNumber,
+			externalPort,
 			// Forward TCP (this could be "UDP" if we wanted that instead).
 			protocol,
 			// Internal port number on the LAN to forward to.
@@ -124,6 +145,31 @@ func (r *ServiceReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	// Even on a "success" we need to come back before our lease is up to redo it.
 	log.Info("Success, ports forwarded.", "reschedule-seconds", leaseDurationSeconds - 30)
 	return ctrl.Result{RequeueAfter: (leaseDurationSeconds - 30) * time.Second}, nil
+}
+
+func getHolepunchPortMapping(service corev1.Service) (map[uint16]uint16, error) {
+	portMapping := make(map[uint16]uint16)
+	for annotationName, annotationValue := range service.Annotations {
+		if strings.HasPrefix(annotationName, holepunchPortMapAnnotationPrefix) {
+			// The term "internal port" is "port on our local network", or "port with the Kubenretes service" exposes.
+			// Meanwhile "external port" is "port exposed by the router on the open internet". If we have the annotaiton
+			// "holepunch.port/80: 3000" that means that our "internal port" is 80 and our "external port" is 3000.
+			internalPortStr := strings.TrimPrefix(annotationName, holepunchPortMapAnnotationPrefix)
+			internalPort, err := strconv.ParseUint(internalPortStr, 10, 16)
+			if err != nil {
+				return nil, err
+			}
+			externalPortStr := annotationValue
+			externalPort, err := strconv.ParseUint(externalPortStr, 10, 16)
+			if err != nil {
+				return nil, err
+			}
+			// These casts to uint16 (from uint64) are safe because we told strconv.ParseUint earlier to confine to 16
+			// bits only.
+			portMapping[uint16(internalPort)] = uint16(externalPort)
+		}
+	}
+	return portMapping, nil
 }
 
 func hasHolepunchAnnotation(service corev1.Service) bool {
