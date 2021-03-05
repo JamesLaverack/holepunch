@@ -20,7 +20,7 @@ import (
 const (
 	holepunchAnnotationName          = "holepunch/punch-external"
 	holepunchPortMapAnnotationPrefix = "holepunch.port/"
-	leaseDurationSeconds             = 500
+	leaseDurationSeconds             = 3600
 )
 
 // ServiceReconciler reconciles a Service object
