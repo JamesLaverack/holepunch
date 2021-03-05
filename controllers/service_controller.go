@@ -90,6 +90,8 @@ func (r *ServiceReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	}
 	log = log.WithValues("service-ip", serviceIP)
 
+	description := fmt.Sprintf("Mapping for %s/%s", service.Name, service.Namespace)
+
 	// Try to forward every port
 	for _, servicePort := range service.Spec.Ports {
 		// For some reason the Kubernetes Service API thinks a port can be an int32. On Linux at least it'll *always*
@@ -100,7 +102,6 @@ func (r *ServiceReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 			log.Error(err, "Unable to resolve protocol to use")
 			return ctrl.Result{}, err
 		}
-		description := "foo" //fmt.Sprintf("%s-%s-%d-%s", service.Name, service.Namespace, portNumber, protocol)
 
 		// Figure out if we want to map the port
 		externalPort, ok := portMapping[portNumber]
