@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/huin/goupnp/dcps/internetgateway1"
 	"github.com/huin/goupnp/dcps/internetgateway2"
 	"golang.org/x/sync/errgroup"
 	corev1 "k8s.io/api/core/v1"
@@ -26,8 +28,9 @@ const (
 // ServiceReconciler reconciles a Service object
 type ServiceReconciler struct {
 	client.Client
-	Log    logr.Logger
-	Scheme *runtime.Scheme
+	Log            logr.Logger
+	Scheme         *runtime.Scheme
+	RouterRootDesc string
 }
 
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch
@@ -64,11 +67,20 @@ func (r *ServiceReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		return ctrl.Result{}, err
 	}
 
+	var router RouterClient
 	// Find a router to configure
-	router, err := PickRouterClient(ctx)
-	if err != nil {
-		log.Error(err, "Failed to find router to configure")
-		return ctrl.Result{}, err
+	if r.RouterRootDesc == "" {
+		router, err = PickRouterClient(ctx)
+		if err != nil {
+			log.Error(err, "Failed to find router to configure")
+			return ctrl.Result{}, err
+		}
+	} else {
+		router, err = PickRouterClient(ctx, r.RouterRootDesc)
+		if err != nil {
+			log.Error(err, "Failed to find router to configure")
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Ask that router for *it's* external IP.
@@ -144,7 +156,7 @@ func (r *ServiceReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	}
 
 	// Even on a "success" we need to come back before our lease is up to redo it.
-	log.Info("Success, ports forwarded.", "reschedule-seconds", leaseDurationSeconds - 30)
+	log.Info("Success, ports forwarded.", "reschedule-seconds", leaseDurationSeconds-30)
 	return ctrl.Result{RequeueAfter: (leaseDurationSeconds - 30) * time.Second}, nil
 }
 
@@ -221,31 +233,65 @@ type RouterClient interface {
 	)
 }
 
-func PickRouterClient(ctx context.Context) (RouterClient, error) {
+func PickRouterClient(ctx context.Context, rootDesc ...string) (RouterClient, error) {
 	tasks, _ := errgroup.WithContext(ctx)
+	var err error
+	var u *url.URL
+	if len(rootDesc) > 0 {
+		u, err = url.Parse(rootDesc[0])
+		if err != nil {
+			return nil, err
+		}
+	}
 	// Request each type of client in parallel, and return what is found.
 	var ip1Clients []*internetgateway2.WANIPConnection1
 	tasks.Go(func() error {
-		var err error
-		ip1Clients, _, err = internetgateway2.NewWANIPConnection1Clients()
+		if u != nil {
+			ip1Clients, err = internetgateway2.NewWANIPConnection1ClientsByURL(u)
+		} else {
+			ip1Clients, _, err = internetgateway2.NewWANIPConnection1Clients()
+		}
 		return err
 	})
 	var ip2Clients []*internetgateway2.WANIPConnection2
 	tasks.Go(func() error {
-		var err error
-		ip2Clients, _, err = internetgateway2.NewWANIPConnection2Clients()
+		if u != nil {
+			ip2Clients, err = internetgateway2.NewWANIPConnection2ClientsByURL(u)
+		} else {
+			ip2Clients, _, err = internetgateway2.NewWANIPConnection2Clients()
+		}
 		return err
 	})
 	var ppp1Clients []*internetgateway2.WANPPPConnection1
 	tasks.Go(func() error {
-		var err error
-		ppp1Clients, _, err = internetgateway2.NewWANPPPConnection1Clients()
+		if u != nil {
+			ppp1Clients, err = internetgateway2.NewWANPPPConnection1ClientsByURL(u)
+		} else {
+			ppp1Clients, _, err = internetgateway2.NewWANPPPConnection1Clients()
+		}
 		return err
 	})
 
-	if err := tasks.Wait(); err != nil {
-		return nil, err
-	}
+	var ip1V1Clients []*internetgateway1.WANIPConnection1
+	tasks.Go(func() error {
+		if u != nil {
+			ip1V1Clients, err = internetgateway1.NewWANIPConnection1ClientsByURL(u)
+		} else {
+			ip1V1Clients, _, err = internetgateway1.NewWANIPConnection1Clients()
+		}
+		return err
+	})
+	var ppp1V1Clients []*internetgateway1.WANPPPConnection1
+	tasks.Go(func() error {
+		if u != nil {
+			ppp1V1Clients, err = internetgateway1.NewWANPPPConnection1ClientsByURL(u)
+		} else {
+			ppp1V1Clients, _, err = internetgateway1.NewWANPPPConnection1Clients()
+		}
+		return err
+	})
+
+	tasks.Wait()
 
 	// Trivial handling for where we find exactly one device to talk to, you
 	// might want to provide more flexible handling than this if multiple
@@ -257,6 +303,10 @@ func PickRouterClient(ctx context.Context) (RouterClient, error) {
 		return ip1Clients[0], nil
 	case len(ppp1Clients) > 0:
 		return ppp1Clients[0], nil
+	case len(ip1V1Clients) > 0:
+		return ip1V1Clients[0], nil
+	case len(ppp1V1Clients) > 0:
+		return ppp1V1Clients[0], nil
 	default:
 		return nil, errors.New("No services found")
 	}
