@@ -291,9 +291,7 @@ func PickRouterClient(ctx context.Context, rootDesc ...string) (RouterClient, er
 		return err
 	})
 
-	if err := tasks.Wait(); err != nil {
-		return nil, err
-	}
+	tasks.Wait()
 
 	// Trivial handling for where we find exactly one device to talk to, you
 	// might want to provide more flexible handling than this if multiple
