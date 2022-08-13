@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/huin/goupnp/dcps/internetgateway1"
 	"github.com/huin/goupnp/dcps/internetgateway2"
 	"golang.org/x/sync/errgroup"
 	corev1 "k8s.io/api/core/v1"
@@ -144,7 +145,7 @@ func (r *ServiceReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	}
 
 	// Even on a "success" we need to come back before our lease is up to redo it.
-	log.Info("Success, ports forwarded.", "reschedule-seconds", leaseDurationSeconds - 30)
+	log.Info("Success, ports forwarded.", "reschedule-seconds", leaseDurationSeconds-30)
 	return ctrl.Result{RequeueAfter: (leaseDurationSeconds - 30) * time.Second}, nil
 }
 
@@ -243,6 +244,19 @@ func PickRouterClient(ctx context.Context) (RouterClient, error) {
 		return err
 	})
 
+	var ip1V1Clients []*internetgateway1.WANIPConnection1
+	tasks.Go(func() error {
+		var err error
+		ip1V1Clients, _, err = internetgateway1.NewWANIPConnection1Clients()
+		return err
+	})
+	var ppp1V1Clients []*internetgateway1.WANPPPConnection1
+	tasks.Go(func() error {
+		var err error
+		ppp1V1Clients, _, err = internetgateway1.NewWANPPPConnection1Clients()
+		return err
+	})
+
 	if err := tasks.Wait(); err != nil {
 		return nil, err
 	}
@@ -257,6 +271,10 @@ func PickRouterClient(ctx context.Context) (RouterClient, error) {
 		return ip1Clients[0], nil
 	case len(ppp1Clients) > 0:
 		return ppp1Clients[0], nil
+	case len(ip1V1Clients) > 0:
+		return ip1V1Clients[0], nil
+	case len(ppp1V1Clients) > 0:
+		return ppp1V1Clients[0], nil
 	default:
 		return nil, errors.New("No services found")
 	}
